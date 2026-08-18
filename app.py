@@ -1257,8 +1257,98 @@ def load_clients():
     return default
 
 
+def is_variable_income_block(text: str) -> bool:
+    """Identifica blocos da XP de renda variável/FIIs.
+
+    Evita falsos positivos como "Inflação" -> "inflacao".
+    """
+    s = normalize_text(text)
+
+    direct_terms = [
+        "fundos imobiliarios",
+        "fundo imobiliario",
+        "renda variavel",
+        "bdr",
+        "etf",
+    ]
+    if any(term in s for term in direct_terms):
+        return True
+
+    # Apenas como palavra/bloco, para não confundir com inflação.
+    if re.search(r"\bacoes\b|\bacao\b", s):
+        return True
+
+    return False
+
+def is_variable_income_header_row(values_lower: list[str]) -> bool:
+    joined = " ".join(normalize_text(v) for v in values_lower)
+    has_asset = "ativo" in joined
+    has_position = "posicao" in joined
+    has_quantity = "qtd" in joined or "quantidade" in joined
+    has_price = "preco medio" in joined or "ultima cotacao" in joined or "cotacao" in joined
+    return has_asset and has_position and (has_quantity or has_price)
+
+
+def classify_variable_income(group_name: str, asset_name: str):
+    s = normalize_text(f"{group_name or ''} {asset_name or ''}")
+
+    if "fundo imobiliario" in s or "fundos imobiliarios" in s or re.search(r"\b[a-z]{4}11\b", s):
+        return "Fundos Imobiliários", "D+2", "risco"
+
+    if "bdr" in s:
+        return "BDRs", "D+2", "risco"
+
+    if "etf" in s:
+        return "ETFs", "D+2", "risco"
+
+    return "Renda Variável", "D+2", "risco"
+
+
+def build_variable_income_position_from_row(row, group_name: str, subgroup_name: str, account: str, titular: str):
+    asset = str(row.iloc[0]).strip() if len(row) > 0 and not is_empty(row.iloc[0]) else ""
+
+    if not asset or normalize_text(asset) in ["ativo", "total", "subtotal"]:
+        return None
+
+    values = []
+    for item in list(row.iloc[1:]):
+        v = parse_money(item)
+        if v > 0:
+            values.append(v)
+
+    # No layout de RV/FII da XP, o maior valor financeiro da linha costuma ser a coluna Posição.
+    # Isso evita depender da posição exata da coluna, que pode mudar entre relatórios.
+    financial_values = [v for v in values if v >= 100]
+    if not financial_values:
+        return None
+
+    valor_bruto = max(financial_values)
+    produto, liquidez, fator = classify_variable_income(group_name, asset)
+
+    return {
+        "conta": str(account),
+        "titular": titular,
+        "ativo": asset.upper(),
+        "produto": produto,
+        "liquidez": liquidez,
+        "fator": fator,
+        "aplicacao": pd.NaT,
+        "vencimento": pd.NaT,
+        "dias_desde_aplicacao": None,
+        "valor": valor_bruto,
+        "valor_bruto": valor_bruto,
+        "valor_liquido": valor_bruto,
+        "ir": 0.0,
+        "grupo_origem": group_name,
+        "subgrupo_origem": subgroup_name,
+    }
+
+
 def classify_product(group_name: str, subgroup_name: str, asset_name: str):
     s = f"{group_name or ''} {subgroup_name or ''} {asset_name or ''}".lower()
+
+    if is_variable_income_block(s):
+        return classify_variable_income(group_name, asset_name)
 
     if "compromiss" in s:
         return "Op. Compromissadas", "D+0", "pos_fixado"
@@ -1282,7 +1372,6 @@ def classify_product(group_name: str, subgroup_name: str, asset_name: str):
 
     return "Outros", "N/A", "outros"
 
-
 def build_position_from_row(row, group_name: str, subgroup_name: str, account: str, titular: str, ref_date: date):
     group_text = f"{group_name or ''} {subgroup_name or ''}".lower()
 
@@ -1291,6 +1380,9 @@ def build_position_from_row(row, group_name: str, subgroup_name: str, account: s
     venc = pd.NaT
     valor_bruto = 0.0
     valor_liquido = 0.0
+
+    if is_variable_income_block(group_text):
+        return build_variable_income_position_from_row(row, group_name, subgroup_name, account, titular)
 
     if "fundo" in group_text:
         asset = str(row.iloc[0]).strip() if not is_empty(row.iloc[0]) else str(group_name).strip().upper()
@@ -1344,7 +1436,7 @@ def build_position_from_row(row, group_name: str, subgroup_name: str, account: s
 
     produto, liquidez, fator = classify_product(group_name, subgroup_name, asset)
 
-    if "fundo" in group_text or "cotiza" in group_text or "cotiz" in group_text or "fidc" in group_text:
+    if (not is_variable_income_block(group_text)) and ("fundo" in group_text or "cotiza" in group_text or "cotiz" in group_text or "fidc" in group_text):
         liquidez = map_fund_liquidity(asset, group_text)
         produto, liquidez, fator = fund_product_from_liquidity(liquidez), liquidez, "pos_fixado"
 
@@ -1417,6 +1509,13 @@ def parse_xp_file(file_obj, filename: str, clients: pd.DataFrame):
                 current_subgroup = None
                 capture_rows = False
 
+            continue
+
+        # Blocos de renda variável/FIIs aparecem com outro cabeçalho:
+        # Ativo | Qtd. Disponível | ... | Última Cotação | Posição
+        if current_group and is_variable_income_block(current_group) and is_variable_income_header_row(values_lower):
+            current_subgroup = current_group
+            capture_rows = True
             continue
 
         if capture_rows:
@@ -1588,7 +1687,8 @@ def load_fund_applications():
 
 
 def prepare_fund_positions_for_matching(positions: pd.DataFrame) -> pd.DataFrame:
-    funds = positions[positions["produto"].str.contains("Fundos", case=False, na=False)].copy()
+    fund_mask = positions["produto"].str.contains("Fundos", case=False, na=False) & ~positions["produto"].str.contains("Imobili", case=False, na=False)
+    funds = positions[fund_mask].copy()
 
     if funds.empty:
         return pd.DataFrame()
@@ -1851,7 +1951,7 @@ def enrich(positions: pd.DataFrame, summary: pd.DataFrame, reference_date: date)
     positions["valor"] = positions["valor_bruto"]
     positions["ir"] = (positions["valor_bruto"] - positions["valor_liquido"]).clip(lower=0).round(2)
 
-    fund_mask = positions["produto"].astype(str).str.contains("Fundos", case=False, na=False)
+    fund_mask = positions["produto"].astype(str).str.contains("Fundos", case=False, na=False) & ~positions["produto"].astype(str).str.contains("Imobili", case=False, na=False)
     if fund_mask.any():
         mapped_liq = positions.loc[fund_mask].apply(lambda r: map_fund_liquidity(r.get("ativo", ""), f"{r.get('grupo_origem', '')} {r.get('subgrupo_origem', '')}"), axis=1)
         positions.loc[fund_mask, "liquidez"] = mapped_liq.values
@@ -2220,10 +2320,14 @@ def product_sort_key(produto: str) -> int:
         return 0
     if "renda fixa" in p:
         return 1
-    if "fundo" in p:
+    if "fundo" in p and "imobili" not in p:
         return 2
-    if "saldo" in p or "caixa" in p:
+    if "fundo" in p and "imobili" in p:
         return 3
+    if "renda variavel" in p or "etf" in p or "bdr" in p:
+        return 4
+    if "saldo" in p or "caixa" in p:
+        return 5
     return 9
 
 
@@ -2239,7 +2343,7 @@ def sort_positions_for_cashflow(df: pd.DataFrame) -> pd.DataFrame:
 
     # Fundos não têm vencimento no relatório. Para eles, a organização fica pela
     # liquidez mapeada, do D+0 para o prazo mais longo.
-    is_fundo = work["produto"].astype(str).str.contains("Fundos", case=False, na=False)
+    is_fundo = work["produto"].astype(str).str.contains("Fundos", case=False, na=False) & ~work["produto"].astype(str).str.contains("Imobili", case=False, na=False)
     work["_ordem_fluxo"] = np.where(is_fundo, 1, 0)
 
     return work.sort_values(
@@ -2412,6 +2516,12 @@ def infer_emissor(row):
 
     if "COMPROMISS" in produto.upper() or "COMPROMISS" in asset:
         return "XP / Compromissadas"
+
+    if "FUNDO" in produto.upper() and "IMOBILI" in produto.upper():
+        return "Fundos Imobiliários"
+
+    if "RENDA VARI" in produto.upper() or "ETF" in produto.upper() or "BDR" in produto.upper():
+        return produto
 
     if "SALDO" in asset:
         return "Caixa"
