@@ -173,6 +173,12 @@ def normalize_text(s) -> str:
     return s
 
 
+def slugify(s) -> str:
+    s = normalize_text(s)
+    s = re.sub(r"[^a-z0-9]+", "_", s).strip("_")
+    return s or "arquivo"
+
+
 def parse_money(x) -> float:
     if x is None:
         return 0.0
@@ -1636,6 +1642,8 @@ def build_fund_lots(apps: pd.DataFrame, positions: pd.DataFrame):
                             "data_aplicacao": mov["data_movimento"],
                             "valor_aplicado_original": valor,
                             "saldo_lote": valor,
+                            "liquidez": current.get("liquidez", "N/A"),
+                            "produto": current.get("produto", "Fundos"),
                             "fonte_lote": "movimentacao",
                         }
                     )
@@ -1653,6 +1661,8 @@ def build_fund_lots(apps: pd.DataFrame, positions: pd.DataFrame):
                         "data_aplicacao": data_base,
                         "valor_aplicado_original": 0.0,
                         "saldo_lote": valor_bruto_atual,
+                        "liquidez": current.get("liquidez", "N/A"),
+                        "produto": current.get("produto", "Fundos"),
                         "fonte_lote": "residual_posicao_xp",
                     }
                 )
@@ -1666,6 +1676,8 @@ def build_fund_lots(apps: pd.DataFrame, positions: pd.DataFrame):
                     "data_aplicacao": pd.NaT,
                     "valor_aplicado_original": 0.0,
                     "saldo_lote": valor_bruto_atual,
+                    "liquidez": current.get("liquidez", "N/A"),
+                    "produto": current.get("produto", "Fundos"),
                     "fonte_lote": "sem_movimentacao",
                 }
             )
@@ -1730,6 +1742,8 @@ def enrich_fund_efficiency(positions: pd.DataFrame, reference_date: date) -> pd.
                 "aliquota_iof": iof_rate,
                 "dias_ate_zerar": dias_zerar,
                 "data_zeragem": data_zeragem,
+                "liquidez": lote.get("liquidez", "N/A"),
+                "produto": lote.get("produto", "Fundos"),
                 "valor_bruto_atual": float(lote["valor_bruto_atual"] or 0),
                 "valor_liquido_atual": float(lote["valor_liquido_atual"] or 0),
                 "ir_atual": float(lote["ir_atual"] or 0),
@@ -1895,6 +1909,15 @@ def render_account_card(row, total_geral: float):
 
 
 
+def sort_product_summary(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    work = df.copy()
+    work["_produto_ordem"] = work["produto"].apply(product_sort_key) if "produto" in work.columns else 9
+    work["_liquidez_ordem"] = work["liquidez"].apply(liquidity_to_days) if "liquidez" in work.columns else 99999
+    return work.sort_values(["_produto_ordem", "_liquidez_ordem", "produto"], ascending=[True, True, True]).drop(columns=["_produto_ordem", "_liquidez_ordem"], errors="ignore")
+
+
 def render_account_strategy_expander(row, positions):
     conta = str(row["conta"])
     titular = str(row["titular"])
@@ -1917,7 +1940,8 @@ def render_account_strategy_expander(row, positions):
                 )
             ),
         ),
-    ).sort_values("valor", ascending=False)
+    )
+    produto = sort_product_summary(produto)
 
     produto["participacao"] = produto["valor"] / produto["valor"].sum()
 
@@ -1959,7 +1983,8 @@ def render_visao_geral(positions, summary, kpis):
                 )
             ),
         ),
-    ).sort_values("valor", ascending=False)
+    )
+    prod = sort_product_summary(prod)
 
     prod["participacao"] = prod["valor"] / prod["valor"].sum()
 
@@ -2022,7 +2047,11 @@ def render_eficiencia_fundos(positions, reference_date: date):
         )
         return
 
-    view = eff.copy().sort_values(["conta", "fundo", "data_aplicacao"])
+    view = eff.copy()
+    view["_liq_ordem"] = view["liquidez"].apply(liquidity_to_days) if "liquidez" in view.columns else 99999
+    view["_data_ordem"] = pd.to_datetime(view["data_aplicacao"], errors="coerce").fillna(pd.Timestamp("2262-04-11"))
+    view = view.sort_values(["conta", "_liq_ordem", "_data_ordem", "fundo"])
+    view["Liq."] = view["liquidez"].apply(lambda x: f'<span class="liquidity-pill">{html.escape(str(x))}</span>') if "liquidez" in view.columns else "—"
     view["Aplicação"] = view["data_aplicacao"].apply(fmt_date_br)
     view["Dias"] = view["dias_desde_aplicacao"].apply(lambda x: "—" if pd.isna(x) else f"{int(x)}d")
     view["IOF"] = view["aliquota_iof"].apply(lambda x: "—" if pd.isna(x) else iof_badge(int(x)))
@@ -2037,6 +2066,7 @@ def render_eficiencia_fundos(positions, reference_date: date):
         [
             "conta",
             "fundo",
+            "Liq.",
             "Aplicação",
             "Dias",
             "IOF",
@@ -2052,6 +2082,7 @@ def render_eficiencia_fundos(positions, reference_date: date):
     out.columns = [
         "Conta",
         "Fundo",
+        "Liq.",
         "Aplicação",
         "Dias",
         "IOF",
@@ -2064,7 +2095,7 @@ def render_eficiencia_fundos(positions, reference_date: date):
     ]
 
     st.markdown(
-        html_table(out, allow_html_cols=["IOF", "Status"], wide=False),
+        html_table(out, allow_html_cols=["Liq.", "IOF", "Status"], wide=False),
         unsafe_allow_html=True,
     )
 
@@ -2072,10 +2103,9 @@ def render_eficiencia_fundos(positions, reference_date: date):
 def render_eficiencia_compromissadas(df):
     section("Eficiência das compromissadas")
 
-    comp = df[df["produto"].eq("Op. Compromissadas")].sort_values(
-        "dias_desde_aplicacao",
-        ascending=False,
-    )
+    comp = df[df["produto"].eq("Op. Compromissadas")].copy()
+    comp["_venc_ordem"] = pd.to_datetime(comp["vencimento"], errors="coerce").fillna(pd.Timestamp("2262-04-11"))
+    comp = comp.sort_values(["_venc_ordem", "conta", "valor_bruto"], ascending=[True, True, False])
 
     if comp.empty:
         st.markdown(
@@ -2107,13 +2137,13 @@ def render_eficiencia_compromissadas(df):
 
 def product_sort_key(produto: str) -> int:
     p = normalize_text(produto)
-    if "saldo" in p:
-        return 0
     if "compromiss" in p:
-        return 1
+        return 0
     if "renda fixa" in p:
-        return 2
+        return 1
     if "fundo" in p:
+        return 2
+    if "saldo" in p or "caixa" in p:
         return 3
     return 9
 
@@ -2126,7 +2156,7 @@ def sort_positions_for_cashflow(df: pd.DataFrame) -> pd.DataFrame:
     work["_vencimento_ordem"] = work["_vencimento_ordem"].fillna(pd.Timestamp("2262-04-11"))
     work["_aplicacao_ordem"] = pd.to_datetime(work["aplicacao"], errors="coerce").fillna(pd.Timestamp("2262-04-11"))
     return work.sort_values(
-        ["titular", "conta", "_produto_ordem", "_vencimento_ordem", "_liquidez_ordem", "_aplicacao_ordem", "ativo"],
+        ["titular", "conta", "_produto_ordem", "_liquidez_ordem", "_vencimento_ordem", "_aplicacao_ordem", "ativo"],
         ascending=[True, True, True, True, True, True, True],
     ).drop(columns=["_produto_ordem", "_liquidez_ordem", "_vencimento_ordem", "_aplicacao_ordem"], errors="ignore")
 
@@ -2150,7 +2180,7 @@ def render_detalhamento(positions, summary, reference_date: date):
     ir_total = float(df["ir"].sum())
     contas = int(df["conta"].nunique())
     posicoes = int(len(df))
-    titulo = selected if selected != "Todos" else "Grupo Botuverá"
+    titulo = selected if selected != "Todos" else PARTNER
 
     st.markdown(
         f"""
@@ -2213,7 +2243,7 @@ def render_detalhamento(positions, summary, reference_date: date):
     st.download_button(
         label="baixar arquivo",
         data=to_excel_bytes(export),
-        file_name=f"tesouraria_botuvera_{str(titulo).lower().replace(' ', '_')}.xlsx",
+        file_name=f"tesouraria_{slugify(str(titulo))}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         help="Baixa a visão filtrada em Excel.",
     )
@@ -2316,116 +2346,111 @@ def load_policy_tables():
     return tables
 
 
+def parse_pct_cell(value, default=None):
+    if value is None:
+        return default
+    try:
+        if pd.isna(value):
+            return default
+    except Exception:
+        pass
+    text = str(value).strip().replace("%", "").replace(",", ".")
+    try:
+        num = float(text)
+    except Exception:
+        return default
+    return num / 100 if num > 1 else num
+
+
+def policy_sheet(tables: dict, name: str) -> pd.DataFrame:
+    wanted = normalize_text(name)
+    for sheet_name, df in tables.items():
+        if normalize_text(sheet_name) == wanted:
+            return df.copy()
+    return pd.DataFrame()
+
+
+def get_liquidity_policy_targets(tables: dict):
+    """Lê metas mínimas da aba Liquidez, quando existir.
+
+    Retorna mínimos para D+0/D+1 e até D+5. Se a planilha não existir,
+    usa fallback conservador compatível com o modelo anterior.
+    """
+    liq = policy_sheet(tables, "Liquidez")
+    targets = {
+        "d1_min": 0.80,
+        "d5_min": None,
+    }
+    if liq.empty:
+        return targets
+
+    cols = {normalize_text(c): c for c in liq.columns}
+    faixa_col = cols.get("faixa de liquidez") or cols.get("faixa") or cols.get("liquidez")
+    min_col = cols.get("alocacao minima") or cols.get("alocacao mínima") or cols.get("minimo") or cols.get("mínimo")
+    prazo_col = cols.get("prazo de resgate") or cols.get("prazo")
+    if not min_col:
+        return targets
+
+    for _, row in liq.iterrows():
+        faixa = normalize_text(row.get(faixa_col, "")) if faixa_col else ""
+        prazo = normalize_text(row.get(prazo_col, "")) if prazo_col else ""
+        minimum = parse_pct_cell(row.get(min_col), None)
+        if minimum is None:
+            continue
+        if "imediata" in faixa or "d+1" in prazo:
+            targets["d1_min"] = minimum
+        if "curta" in faixa or "d+5" in prazo or "ate d+5" in prazo:
+            targets["d5_min"] = minimum
+    return targets
+
+
 def render_policy_config_tables():
     tables = load_policy_tables()
     if not tables:
         return False
+
+    allowed = ["Liquidez", "Produtos", "Concentracao", "Concentração"]
+    rendered = False
     section("Política configurada")
     for sheet_name, df in tables.items():
-        st.markdown(f'<div class="section-title" style="margin-top:10px;">{html.escape(str(sheet_name))}</div>', unsafe_allow_html=True)
+        sheet_norm = normalize_text(sheet_name)
+        if sheet_norm not in [normalize_text(x) for x in allowed]:
+            continue
+        if df.empty:
+            continue
+        rendered = True
+        st.markdown(
+            f'<div class="section-title" style="margin-top:10px;">{html.escape(str(sheet_name))}</div>',
+            unsafe_allow_html=True,
+        )
         st.markdown(html_table(df, wide=False), unsafe_allow_html=True)
-    return True
+    return rendered
 
 
-def render_politica(positions, kpis):
-    section("Política de investimentos")
-
-    pos_fixado = positions[positions["fator"].isin(["pos_fixado", "caixa", "isento"])]["valor"].sum()
-    pos_fixado_pct = safe_div(pos_fixado, kpis["total"])
-
-    non_comp_cfo = positions[
-        (positions["produto"] != "Op. Compromissadas")
-        & (positions["valor"] >= VALIDACAO_CFO_VALOR)
-    ].copy()
-
-    checks = pd.DataFrame(
-        [
-            [
-                "Risco de mercado",
-                "Mínimo de 80% em caixa/pós-fixado/isentos",
-                status_badge(pos_fixado_pct >= MIN_POS_FIXADO),
-                pct(pos_fixado_pct),
-            ],
-            [
-                "Liquidez operacional",
-                "Disponibilidade em D+0 ou D+1",
-                status_badge(kpis["liquidez_d0_pct"] >= 0.80),
-                pct(kpis["liquidez_d0_pct"]),
-            ],
-            [
-                "Validação CFO",
-                "Aplicações acima de R$ 5 mi, exceto compromissadas",
-                status_badge(non_comp_cfo.empty),
-                f"{len(non_comp_cfo)} alerta(s)",
-            ],
-            [
-                "IR consolidado",
-                "Diferença entre posição bruta e valor líquido",
-                status_badge(True),
-                brl(kpis["ir_total"]),
-            ],
-        ],
-        columns=["Controle", "Regra", "Status", "Leitura"],
-    )
-
-    st.markdown(
-        html_table(checks, allow_html_cols=["Status"], wide=False),
-        unsafe_allow_html=True,
-    )
-
-    render_policy_config_tables()
-
-    section("Limite por produto / emissor")
-
-    limite_emissor = min(kpis["total"] * LIMITE_EMISSOR_PCT, LIMITE_EMISSOR_VALOR)
-
-    emissor_df = positions.copy()
-    emissor_df["emissor"] = emissor_df.apply(infer_emissor, axis=1)
-
-    emissores = emissor_df.groupby("emissor", as_index=False).agg(
-        valor=("valor", "sum"),
-        valor_liquido=("valor_liquido", "sum"),
-        ir=("ir", "sum"),
-    ).sort_values("valor", ascending=False)
-
-    emissores["% carteira"] = emissores["valor"] / kpis["total"]
-    emissores["limite"] = limite_emissor
-    emissores["status"] = emissores["valor"].apply(lambda v: status_badge(v <= limite_emissor))
-
-    emissores["% carteira"] = emissores["% carteira"].apply(pct)
-    emissores["limite"] = emissores["limite"].apply(brl)
-    emissores["valor bruto"] = emissores["valor"].apply(brl)
-    emissores["IR"] = emissores["ir"].apply(brl)
-    emissores["valor líquido"] = emissores["valor_liquido"].apply(brl)
-
-    emissores = emissores[
-        [
-            "emissor",
-            "valor bruto",
-            "% carteira",
-            "limite",
-            "IR",
-            "valor líquido",
-            "status",
-        ]
-    ]
-
-    emissores.columns = [
-        "Produto / Emissor",
-        "Bruto",
-        "% cart.",
-        "Limite",
-        "IR",
-        "Líquido",
-        "Status",
-    ]
-
-    st.markdown(
-        html_table(emissores, allow_html_cols=["Status"], wide=False),
-        unsafe_allow_html=True,
-    )
+def render_horarios_operacionais():
+    tables = load_policy_tables()
+    horarios = policy_sheet(tables, "Horarios")
 
     section("Horários operacionais")
+
+    if not horarios.empty:
+        cols = {normalize_text(c): c for c in horarios.columns}
+        inst_col = cols.get("instituicao") or cols.get("instituição")
+        if inst_col:
+            inst_values = [x for x in horarios[inst_col].dropna().unique().tolist() if str(x).strip()]
+            if len(inst_values) >= 2:
+                columns = st.columns(min(len(inst_values), 3))
+                for idx, inst in enumerate(inst_values[:3]):
+                    with columns[idx]:
+                        df_inst = horarios[horarios[inst_col].astype(str) == str(inst)].drop(columns=[inst_col], errors="ignore")
+                        st.markdown(
+                            f'<div class="section-title" style="margin-top:0;">{html.escape(str(inst))}</div>',
+                            unsafe_allow_html=True,
+                        )
+                        st.markdown(html_table(df_inst, wide=False), unsafe_allow_html=True)
+                return
+        st.markdown(html_table(horarios, wide=False), unsafe_allow_html=True)
+        return
 
     xp = pd.DataFrame(
         [
@@ -2460,12 +2485,95 @@ def render_politica(positions, kpis):
     )
 
     col1, col2 = st.columns(2)
-
     with col1:
         st.markdown(html_table(xp, wide=False), unsafe_allow_html=True)
-
     with col2:
         st.markdown(html_table(btg, wide=False), unsafe_allow_html=True)
+
+
+def render_politica(positions, kpis):
+    section("Política de investimentos")
+
+    tables = load_policy_tables()
+    targets = get_liquidity_policy_targets(tables)
+
+    d1_value = float(positions[positions["liquidez"].apply(liquidity_to_days) <= 1]["valor"].sum())
+    d5_value = float(positions[positions["liquidez"].apply(liquidity_to_days) <= 5]["valor"].sum())
+    d1_pct = safe_div(d1_value, kpis["total"])
+    d5_pct = safe_div(d5_value, kpis["total"])
+
+    non_comp_cfo = positions[
+        (positions["produto"] != "Op. Compromissadas")
+        & (positions["valor"] >= VALIDACAO_CFO_VALOR)
+    ].copy()
+
+    checks_rows = [
+        [
+            "Liquidez imediata",
+            f"D+0/D+1 mínimo {pct(targets['d1_min'])}",
+            status_badge(d1_pct >= targets["d1_min"]),
+            pct(d1_pct),
+        ],
+    ]
+    if targets.get("d5_min") is not None:
+        checks_rows.append(
+            [
+                "Liquidez curta acumulada",
+                f"Até D+5 mínimo {pct(targets['d5_min'])}",
+                status_badge(d5_pct >= targets["d5_min"]),
+                pct(d5_pct),
+            ]
+        )
+    checks_rows.extend(
+        [
+            [
+                "Validação CFO",
+                "Aplicações acima de R$ 5 mi, exceto compromissadas",
+                status_badge(non_comp_cfo.empty),
+                f"{len(non_comp_cfo)} alerta(s)",
+            ],
+            [
+                "IR consolidado",
+                "Diferença entre posição bruta e valor líquido",
+                status_badge(True),
+                brl(kpis["ir_total"]),
+            ],
+        ]
+    )
+
+    checks = pd.DataFrame(checks_rows, columns=["Controle", "Regra", "Status", "Leitura"])
+    st.markdown(html_table(checks, allow_html_cols=["Status"], wide=False), unsafe_allow_html=True)
+
+    render_policy_config_tables()
+
+    section("Limite por produto / emissor")
+
+    limite_emissor = min(kpis["total"] * LIMITE_EMISSOR_PCT, LIMITE_EMISSOR_VALOR)
+
+    emissor_df = positions.copy()
+    emissor_df["emissor"] = emissor_df.apply(infer_emissor, axis=1)
+
+    emissores = emissor_df.groupby("emissor", as_index=False).agg(
+        valor=("valor", "sum"),
+        valor_liquido=("valor_liquido", "sum"),
+        ir=("ir", "sum"),
+    ).sort_values("valor", ascending=False)
+
+    emissores["% carteira"] = emissores["valor"] / kpis["total"]
+    emissores["limite"] = limite_emissor
+    emissores["status"] = emissores["valor"].apply(lambda v: status_badge(v <= limite_emissor))
+
+    emissores["% carteira"] = emissores["% carteira"].apply(pct)
+    emissores["limite"] = emissores["limite"].apply(brl)
+    emissores["valor bruto"] = emissores["valor"].apply(brl)
+    emissores["IR"] = emissores["ir"].apply(brl)
+    emissores["valor líquido"] = emissores["valor_liquido"].apply(brl)
+
+    emissores = emissores[["emissor", "valor bruto", "% carteira", "limite", "IR", "valor líquido", "status"]]
+    emissores.columns = ["Produto / Emissor", "Bruto", "% cart.", "Limite", "IR", "Líquido", "Status"]
+    st.markdown(html_table(emissores, allow_html_cols=["Status"], wide=False), unsafe_allow_html=True)
+
+    render_horarios_operacionais()
 
     st.markdown(
         '<div class="muted" style="margin-top:12px;">Aplicações feitas fora da janela de funcionamento ficam agendadas para o dia útil seguinte, sujeitas à disponibilidade do ativo nas mesmas condições. Horários de Brasília.</div>',
@@ -2538,7 +2646,7 @@ def main():
         render_politica(positions, kpis)
 
     st.markdown(
-        f'<div class="footer">{GESTOR} • Tesouraria Grupo Botuverá • Informações confidenciais</div>',
+        f'<div class="footer">{GESTOR} • Tesouraria {PARTNER} • Informações confidenciais</div>',
         unsafe_allow_html=True,
     )
 
