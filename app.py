@@ -31,6 +31,7 @@ CLIENT_LOGO = BASE_DIR / "data" / "assets" / "Logo-sementestropical.png"
 BOTUVERA_LOGO = CLIENT_LOGO  # compatibilidade com o restante do app
 MWEALTH_LOGO = BASE_DIR / "mwealth-light.png"
 FUND_APPLICATIONS_FILE = CONFIG_DIR / "aplicacoes_fundos.xlsx"
+FUND_APPLICATIONS_FALLBACK = BASE_DIR / "Aplicações Fundos de Investimentos Botuverá.xlsx"
 FUND_MAPPING_FILE = CONFIG_DIR / "fundos_mapeamento.xlsx"
 POLICY_FILE = CONFIG_DIR / "politica_investimentos.xlsx"
 
@@ -354,6 +355,23 @@ def canonical_liquidity(liquidity) -> str:
 def fund_product_from_liquidity(liquidity) -> str:
     liq = canonical_liquidity(liquidity)
     return f"Fundos {liq}" if liq != "N/A" else "Fundos"
+
+
+def days_until_date(target_date, reference_date: date):
+    """Dias corridos entre a data de atualização e o vencimento.
+    Usado para ordenar a renda fixa pelo que vence primeiro.
+    """
+    d = parse_date_br(target_date)
+    if d is None:
+        return np.nan
+    try:
+        if pd.isna(d):
+            return np.nan
+    except Exception:
+        pass
+    if not isinstance(d, date) or not isinstance(reference_date, date):
+        return np.nan
+    return (d - reference_date).days
 
 
 def load_fund_mapping():
@@ -1200,10 +1218,14 @@ def classify_product(group_name: str, subgroup_name: str, asset_name: str):
         return fund_product_from_liquidity(liq), liq, "pos_fixado"
 
     if any(x in s for x in ["lca", "lci"]):
-        return "Renda Fixa Isenta", "D+0", "isento"
+        # Renda fixa isenta não é D+0 por definição.
+        # No detalhamento, o prazo correto vem do vencimento do papel.
+        return "Renda Fixa Isenta", "Vencimento", "isento"
 
     if any(x in s for x in ["cdb", "tesouro", "letra financeira", "debenture", "debênture", "cra", "cri", "lf ", " lc "]):
-        return "Renda Fixa", "D+31", "pos_fixado"
+        # Não travar renda fixa em D+31.
+        # A liquidez operacional é o próprio vencimento do título.
+        return "Renda Fixa", "Vencimento", "pos_fixado"
 
     return "Outros", "N/A", "outros"
 
@@ -1784,6 +1806,7 @@ def enrich(positions: pd.DataFrame, summary: pd.DataFrame, reference_date: date)
 
     positions["aplicacao_fmt"] = positions["aplicacao"].apply(fmt_date_br)
     positions["vencimento_fmt"] = positions["vencimento"].apply(fmt_date_br)
+    positions["dias_ate_vencimento"] = positions["vencimento"].apply(lambda x: days_until_date(x, reference_date))
 
     totals_by_account = positions.groupby("conta")["valor"].sum().rename("patrimonio")
     liquid_by_account = positions.groupby("conta")["valor_liquido"].sum().rename("patrimonio_liquido")
@@ -2068,7 +2091,7 @@ def render_eficiencia_fundos(positions, reference_date: date):
             "fundo",
             "Liq.",
             "Aplicação",
-            "Dias",
+            "Vence em",
             "IOF",
             "Zera em",
             "Data zero",
@@ -2084,7 +2107,7 @@ def render_eficiencia_fundos(positions, reference_date: date):
         "Fundo",
         "Liq.",
         "Aplicação",
-        "Dias",
+        "Vence em",
         "IOF",
         "Zera em",
         "Data zero",
@@ -2152,13 +2175,21 @@ def sort_positions_for_cashflow(df: pd.DataFrame) -> pd.DataFrame:
     work = df.copy()
     work["_produto_ordem"] = work["produto"].apply(product_sort_key)
     work["_liquidez_ordem"] = work["liquidez"].apply(liquidity_to_days)
+
+    # Para renda fixa e compromissadas, a cascata correta é pelo vencimento
+    # mais próximo em relação à data de atualização da posição.
     work["_vencimento_ordem"] = pd.to_datetime(work["vencimento"], errors="coerce")
     work["_vencimento_ordem"] = work["_vencimento_ordem"].fillna(pd.Timestamp("2262-04-11"))
-    work["_aplicacao_ordem"] = pd.to_datetime(work["aplicacao"], errors="coerce").fillna(pd.Timestamp("2262-04-11"))
+
+    # Fundos não têm vencimento no relatório. Para eles, a organização fica pela
+    # liquidez mapeada, do D+0 para o prazo mais longo.
+    is_fundo = work["produto"].astype(str).str.contains("Fundos", case=False, na=False)
+    work["_ordem_fluxo"] = np.where(is_fundo, 1, 0)
+
     return work.sort_values(
-        ["titular", "conta", "_produto_ordem", "_liquidez_ordem", "_vencimento_ordem", "_aplicacao_ordem", "ativo"],
-        ascending=[True, True, True, True, True, True, True],
-    ).drop(columns=["_produto_ordem", "_liquidez_ordem", "_vencimento_ordem", "_aplicacao_ordem"], errors="ignore")
+        ["titular", "conta", "_ordem_fluxo", "_vencimento_ordem", "_liquidez_ordem", "ativo"],
+        ascending=[True, True, True, True, True, True],
+    ).drop(columns=["_produto_ordem", "_liquidez_ordem", "_vencimento_ordem", "_ordem_fluxo"], errors="ignore")
 
 
 def render_detalhamento(positions, summary, reference_date: date):
@@ -2206,7 +2237,7 @@ def render_detalhamento(positions, summary, reference_date: date):
     export = df.copy()
     export["Aplicação"] = export["aplicacao"].apply(fmt_date_br)
     export["Vencimento"] = export["vencimento"].apply(fmt_date_br)
-    export["Dias desde aplicação"] = export["dias_desde_aplicacao"].apply(
+    export["Dias até vencimento"] = export["dias_ate_vencimento"].apply(
         lambda x: "" if x is None or pd.isna(x) else int(x)
     )
 
@@ -2219,7 +2250,7 @@ def render_detalhamento(positions, summary, reference_date: date):
             "liquidez",
             "Aplicação",
             "Vencimento",
-            "Dias desde aplicação",
+            "Dias até vencimento",
             "valor_bruto",
             "ir",
             "valor_liquido",
@@ -2234,7 +2265,7 @@ def render_detalhamento(positions, summary, reference_date: date):
         "Liquidez",
         "Aplicação",
         "Vencimento",
-        "Dias desde aplicação",
+        "Dias até vencimento",
         "Valor bruto",
         "IR",
         "Valor líquido",
@@ -2251,7 +2282,9 @@ def render_detalhamento(positions, summary, reference_date: date):
     view = sort_positions_for_cashflow(df).copy()
 
     view["Liq."] = view["liquidez"].apply(lambda x: f'<span class="liquidity-pill">{html.escape(str(x))}</span>')
-    view["Dias"] = view["dias_desde_aplicacao"].apply(lambda x: "—" if x is None or pd.isna(x) else f"{int(x)}d")
+    view["Vence em"] = view["dias_ate_vencimento"].apply(
+        lambda x: "—" if x is None or pd.isna(x) else (f"{int(x)}d" if int(x) >= 0 else "vencido")
+    )
     view["Part."] = view["participacao_conta"].apply(pct)
     view["Bruto"] = view["valor_bruto"].apply(brl)
     view["IR"] = view["ir"].apply(lambda x: f'<span class="tax-pill">{brl(x)}</span>' if float(x or 0) > 0 else brl(0))
@@ -2271,7 +2304,7 @@ def render_detalhamento(positions, summary, reference_date: date):
             "Liq.",
             "aplicacao_fmt",
             "vencimento_fmt",
-            "Dias",
+            "Vence em",
             "IOF",
             "Part.",
             "Bruto",
@@ -2288,7 +2321,7 @@ def render_detalhamento(positions, summary, reference_date: date):
         "Liq.",
         "Aplic.",
         "Venc.",
-        "Dias",
+        "Vence em",
         "IOF",
         "Part.",
         "Bruto",
@@ -2491,6 +2524,42 @@ def render_horarios_operacionais():
         st.markdown(html_table(btg, wide=False), unsafe_allow_html=True)
 
 
+def get_concentration_policy_limit_pct(tables: dict, default_pct=LIMITE_EMISSOR_PCT):
+    """Busca um limite percentual na aba Concentração/Concentracao.
+
+    Prioridade: linha 'Por ativo'; depois linhas com 'nível 1' ou limite numérico.
+    Retorna percentual decimal, ex.: 25% -> 0.25.
+    """
+    conc = policy_sheet(tables, "Concentracao")
+    if conc.empty:
+        conc = policy_sheet(tables, "Concentração")
+    if conc.empty:
+        return default_pct
+
+    cols = {normalize_text(c): c for c in conc.columns}
+    limite_col = cols.get("limite") or cols.get("limites maximo de concentracao") or cols.get("limites máximo de concentração")
+    max_col = cols.get("maximo") or cols.get("máximo") or cols.get("alocacao maxima") or cols.get("alocação máxima")
+    if not max_col:
+        return default_pct
+
+    candidates = []
+    for _, row in conc.iterrows():
+        label = normalize_text(row.get(limite_col, "")) if limite_col else ""
+        val = parse_pct_cell(row.get(max_col), None)
+        if val is None:
+            continue
+        if "por ativo" in label:
+            return val
+        if "nivel 1" in label or "nível 1" in label:
+            candidates.append((0, val))
+        else:
+            candidates.append((1, val))
+    if candidates:
+        candidates = sorted(candidates, key=lambda x: x[0])
+        return candidates[0][1]
+    return default_pct
+
+
 def render_politica(positions, kpis):
     section("Política de investimentos")
 
@@ -2502,10 +2571,13 @@ def render_politica(positions, kpis):
     d1_pct = safe_div(d1_value, kpis["total"])
     d5_pct = safe_div(d5_value, kpis["total"])
 
-    non_comp_cfo = positions[
-        (positions["produto"] != "Op. Compromissadas")
-        & (positions["valor"] >= VALIDACAO_CFO_VALOR)
-    ].copy()
+    concentration_limit_pct = get_concentration_policy_limit_pct(tables)
+    concentration_limit_value = kpis["total"] * concentration_limit_pct
+
+    emissor_check = positions.copy()
+    emissor_check["emissor"] = emissor_check.apply(infer_emissor, axis=1)
+    top_concentration_value = float(emissor_check.groupby("emissor")["valor"].sum().max()) if not emissor_check.empty else 0.0
+    top_concentration_pct = safe_div(top_concentration_value, kpis["total"])
 
     checks_rows = [
         [
@@ -2527,10 +2599,10 @@ def render_politica(positions, kpis):
     checks_rows.extend(
         [
             [
-                "Validação CFO",
-                "Aplicações acima de R$ 5 mi, exceto compromissadas",
-                status_badge(non_comp_cfo.empty),
-                f"{len(non_comp_cfo)} alerta(s)",
+                "Concentração máxima",
+                f"Limite configurado {pct(concentration_limit_pct)} do PL",
+                status_badge(top_concentration_pct <= concentration_limit_pct),
+                pct(top_concentration_pct),
             ],
             [
                 "IR consolidado",
@@ -2548,7 +2620,7 @@ def render_politica(positions, kpis):
 
     section("Limite por produto / emissor")
 
-    limite_emissor = min(kpis["total"] * LIMITE_EMISSOR_PCT, LIMITE_EMISSOR_VALOR)
+    limite_emissor = concentration_limit_value
 
     emissor_df = positions.copy()
     emissor_df["emissor"] = emissor_df.apply(infer_emissor, axis=1)
@@ -2603,9 +2675,9 @@ def main():
         )
 
         st.divider()
-        st.markdown("### Regras atuais")
-        st.write(f"• Mínimo pós-fixado: **{pct(MIN_POS_FIXADO)}**")
-        st.write(f"• Validação CFO acima de: **{brl(VALIDACAO_CFO_VALOR)}**")
+        st.markdown("### Configurações")
+        st.write("• Política: `data/config/politica_investimentos.xlsx`")
+        st.write("• Fundos: `data/config/fundos_mapeamento.xlsx`")
         st.write("• IOF de fundos: 96% no 1º dia e zeragem no 30º dia corrido")
 
     if uploaded:
