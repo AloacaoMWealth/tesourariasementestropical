@@ -463,6 +463,27 @@ def logo_base64(path: Path) -> str:
     return base64.b64encode(path.read_bytes()).decode("utf-8")
 
 
+def get_page_icon():
+    """Retorna um favicon robusto para a guia do navegador.
+
+    Usa a logo definida em cliente.toml quando existir; redimensiona para
+    64x64 para evitar falha de favicon com imagens grandes ou largas.
+    """
+    for path in [CLIENT_LOGO, BOTUVERA_LOGO]:
+        try:
+            if path and Path(path).exists():
+                img = Image.open(path).convert("RGBA")
+                img.thumbnail((64, 64), Image.LANCZOS)
+                canvas = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+                x = (64 - img.width) // 2
+                y = (64 - img.height) // 2
+                canvas.paste(img, (x, y), img)
+                return canvas
+        except Exception:
+            continue
+    return "📊"
+
+
 def iof_rate_by_days(days: int) -> int:
     try:
         d = int(days)
@@ -525,10 +546,16 @@ def inject_css():
         [data-testid="stToolbar"],
         [data-testid="stDecoration"] {
             background: transparent !important;
+            visibility: visible !important;
+        }
+
+        section[data-testid="stSidebar"],
+        [data-testid="collapsedControl"] {
+            display: none !important;
         }
 
         .block-container {
-            max-width: 1640px !important;
+            max-width: 1540px !important;
             margin: 0 auto;
             padding-top: 1.0rem;
             padding-left: 1.0rem;
@@ -2688,7 +2715,7 @@ def render_politica(positions, kpis):
 
 
 def main():
-    page_icon = Image.open(BOTUVERA_LOGO) if BOTUVERA_LOGO.exists() else "📊"
+    page_icon = get_page_icon()
 
     st.set_page_config(
         page_title=APP_TITLE,
@@ -2699,20 +2726,11 @@ def main():
 
     inject_css()
 
-    with st.sidebar:
-        st.markdown("### Atualização de dados")
-        st.caption("Use os arquivos em `data/positions/` ou faça upload manual para conferência.")
-        uploaded = st.file_uploader(
-            "Upload manual de posições XP",
-            type=["xlsx"],
-            accept_multiple_files=True,
-        )
-
-        st.divider()
-        st.markdown("### Configurações")
-        st.write("• Política: `data/config/politica_investimentos.xlsx`")
-        st.write("• Fundos: `data/config/fundos_mapeamento.xlsx`")
-        st.write("• IOF de fundos: 96% no 1º dia e zeragem no 30º dia corrido")
+    # App em modo operacional: dados vêm dos arquivos do repositório.
+    # A barra lateral foi removida para não poluir a apresentação.
+    # Para atualizar: use o menu do Streamlit no canto superior direito
+    # ou faça novo commit nos arquivos de data/positions/.
+    uploaded = None
 
     if uploaded:
         positions, summary = load_data_from_uploads(uploaded)
