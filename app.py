@@ -528,11 +528,11 @@ def inject_css():
         }
 
         .block-container {
-            max-width: 1320px !important;
+            max-width: 1640px !important;
             margin: 0 auto;
-            padding-top: 1.15rem;
-            padding-left: 1.1rem;
-            padding-right: 1.1rem;
+            padding-top: 1.0rem;
+            padding-left: 1.0rem;
+            padding-right: 1.0rem;
             padding-bottom: 3rem;
         }
 
@@ -892,7 +892,14 @@ def inject_css():
         }
 
         .table-shell.wide table.pretty {
-            min-width:100%;
+            min-width:1450px;
+            table-layout:auto;
+        }
+
+        .table-shell.wide th,
+        .table-shell.wide td {
+            white-space:normal;
+            word-break:normal;
         }
 
         table.pretty thead {
@@ -901,25 +908,25 @@ def inject_css():
 
         table.pretty th {
             color:#9EC5FF !important;
-            font-size:.62rem;
-            letter-spacing:.06em;
+            font-size:.60rem;
+            letter-spacing:.055em;
             text-transform:uppercase;
-            padding:8px 9px;
+            padding:7px 8px;
             text-align:left;
             border-bottom:1px solid rgba(148,163,184,.14);
             white-space:normal;
-            line-height:1.25;
+            line-height:1.22;
         }
 
         table.pretty td {
             color:#F8FAFC !important;
-            padding:8px 9px;
+            padding:7px 8px;
             border-bottom:1px solid rgba(148,163,184,.08);
             vertical-align:middle;
             font-weight:650;
-            line-height:1.32;
+            line-height:1.28;
             text-align:left;
-            font-size:.78rem;
+            font-size:.76rem;
             white-space:normal;
             word-break:normal;
         }
@@ -1035,6 +1042,25 @@ def inject_css():
             font-size:.78rem;
             margin-top:34px;
         }
+
+        div[data-testid="stExpander"] {
+            background:rgba(15,23,42,.50) !important;
+            border:1px solid rgba(148,163,184,.10) !important;
+            border-radius:18px !important;
+            overflow:hidden !important;
+            margin-bottom:12px !important;
+        }
+
+        div[data-testid="stExpander"] details {
+            border:none !important;
+        }
+
+        div[data-testid="stExpander"] summary {
+            color:#A9C7FF !important;
+            font-weight:850 !important;
+            letter-spacing:.02em !important;
+        }
+
 
         @media (max-width:1180px) {
             .kpi-grid {
@@ -2074,7 +2100,10 @@ def render_eficiencia_fundos(positions, reference_date: date):
     view["_liq_ordem"] = view["liquidez"].apply(liquidity_to_days) if "liquidez" in view.columns else 99999
     view["_data_ordem"] = pd.to_datetime(view["data_aplicacao"], errors="coerce").fillna(pd.Timestamp("2262-04-11"))
     view = view.sort_values(["conta", "_liq_ordem", "_data_ordem", "fundo"])
-    view["Liq."] = view["liquidez"].apply(lambda x: f'<span class="liquidity-pill">{html.escape(str(x))}</span>') if "liquidez" in view.columns else "—"
+    view["Liq."] = view.apply(
+        lambda r: f'<span class="liquidity-pill">{html.escape("Venc." if str(r.get("liquidez", "")) == "Vencimento" else str(r.get("liquidez", "")))}</span>',
+        axis=1,
+    ) if "liquidez" in view.columns else "—"
     view["Aplicação"] = view["data_aplicacao"].apply(fmt_date_br)
     view["Dias"] = view["dias_desde_aplicacao"].apply(lambda x: "—" if pd.isna(x) else f"{int(x)}d")
     view["IOF"] = view["aliquota_iof"].apply(lambda x: "—" if pd.isna(x) else iof_badge(int(x)))
@@ -2118,7 +2147,7 @@ def render_eficiencia_fundos(positions, reference_date: date):
     ]
 
     st.markdown(
-        html_table(out, allow_html_cols=["Liq.", "IOF", "Status"], wide=False),
+        html_table(out, allow_html_cols=["Liq.", "IOF", "Status"], wide=True),
         unsafe_allow_html=True,
     )
 
@@ -2271,6 +2300,8 @@ def render_detalhamento(positions, summary, reference_date: date):
         "Valor líquido",
     ]
 
+    section("Posição detalhada")
+
     st.download_button(
         label="baixar arquivo",
         data=to_excel_bytes(export),
@@ -2281,7 +2312,10 @@ def render_detalhamento(positions, summary, reference_date: date):
 
     view = sort_positions_for_cashflow(df).copy()
 
-    view["Liq."] = view["liquidez"].apply(lambda x: f'<span class="liquidity-pill">{html.escape(str(x))}</span>')
+    view["Liq."] = view.apply(
+        lambda r: f'<span class="liquidity-pill">{html.escape("Venc." if str(r.get("liquidez", "")) == "Vencimento" else str(r.get("liquidez", "")))}</span>',
+        axis=1,
+    )
     view["Vence em"] = view["dias_ate_vencimento"].apply(
         lambda x: "—" if x is None or pd.isna(x) else (f"{int(x)}d" if int(x) >= 0 else "vencido")
     )
@@ -2330,7 +2364,7 @@ def render_detalhamento(positions, summary, reference_date: date):
     ]
 
     st.markdown(
-        html_table(table_view, allow_html_cols=["Liq.", "IR"], wide=False),
+        html_table(table_view, allow_html_cols=["Liq.", "IR"], wide=True),
         unsafe_allow_html=True,
     )
 
