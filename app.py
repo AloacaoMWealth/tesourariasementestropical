@@ -6,6 +6,11 @@ from difflib import SequenceMatcher
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+try:
+    import tomllib
+except Exception:
+    tomllib = None
+
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -19,17 +24,22 @@ GESTOR = "M Wealth"
 
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_POSITIONS_DIR = BASE_DIR / "data" / "positions"
-CLIENT_CONFIG = BASE_DIR / "data" / "config" / "clientes.csv"
-BOTUVERA_LOGO = BASE_DIR / "data" / "assets" / "Logo-sementestropical.png"
+CONFIG_DIR = BASE_DIR / "data" / "config"
+CLIENT_CONFIG = CONFIG_DIR / "clientes.csv"
+CLIENT_PROFILE = CONFIG_DIR / "cliente.toml"
+CLIENT_LOGO = BASE_DIR / "data" / "assets" / "Logo-sementestropical.png"
+BOTUVERA_LOGO = CLIENT_LOGO  # compatibilidade com o restante do app
 MWEALTH_LOGO = BASE_DIR / "mwealth-light.png"
-FUND_APPLICATIONS_FILE = BASE_DIR / "data" / "config" / "aplicacoes_fundos.xlsx"
+FUND_APPLICATIONS_FILE = CONFIG_DIR / "aplicacoes_fundos.xlsx"
+FUND_MAPPING_FILE = CONFIG_DIR / "fundos_mapeamento.xlsx"
+POLICY_FILE = CONFIG_DIR / "politica_investimentos.xlsx"
 
 MIN_POS_FIXADO = 0.80
 VALIDACAO_CFO_VALOR = 5_000_000
 LIMITE_EMISSOR_VALOR = 10_000_000
 LIMITE_EMISSOR_PCT = 0.50
 
-LIQUIDITY_ORDER = ["D+0", "D+1", "D+31", "N/A"]
+LIQUIDITY_ORDER = ["D+0", "D+1", "D+2", "D+3", "D+4", "D+5", "D+30", "D+31", "D+60", "D+90", "D+120", "D+180", "D+181", "N/A"]
 
 # IOF regressivo para fundos: dias corridos.
 # Dia 1 começa em 96%; no 30º dia a alíquota zera.
@@ -65,6 +75,52 @@ IOF_TABLE = {
     29: 3,
     30: 0,
 }
+
+
+def parse_bool(value, default=False):
+    s = normalize_text(value)
+    if s in ["sim", "s", "true", "1", "yes"]:
+        return True
+    if s in ["nao", "não", "n", "false", "0", "no"]:
+        return False
+    return default
+
+
+def load_client_profile():
+    """Carrega dados do cliente sem precisar mexer no código.
+
+    Arquivo opcional: data/config/cliente.toml
+    Exemplo:
+    [cliente]
+    app_title = "Tesouraria Sementes Tropical"
+    partner = "Sementes Tropical"
+    gestor = "M Wealth"
+    subtitle = "Gestão Profissional do Caixa Empresarial"
+    logo = "data/assets/Logo-sementestropical.png"
+    """
+    global APP_TITLE, SUBTITLE, PARTNER, GESTOR, CLIENT_LOGO, BOTUVERA_LOGO
+    if not CLIENT_PROFILE.exists() or tomllib is None:
+        return
+    try:
+        data = tomllib.loads(CLIENT_PROFILE.read_text(encoding="utf-8"))
+        cliente = data.get("cliente", {})
+        APP_TITLE = cliente.get("app_title", APP_TITLE)
+        SUBTITLE = cliente.get("subtitle", SUBTITLE)
+        PARTNER = cliente.get("partner", PARTNER)
+        GESTOR = cliente.get("gestor", GESTOR)
+        logo_value = cliente.get("logo")
+        if logo_value:
+            logo_path = Path(str(logo_value))
+            if not logo_path.is_absolute():
+                logo_path = BASE_DIR / logo_path
+            CLIENT_LOGO = logo_path
+            BOTUVERA_LOGO = CLIENT_LOGO
+    except Exception:
+        pass
+
+
+load_client_profile()
+
 
 
 def brl(v: float) -> str:
@@ -256,6 +312,102 @@ def fund_match_score(a: str, b: str) -> float:
     seq_score = SequenceMatcher(None, a, b).ratio()
 
     return max(token_score, seq_score)
+
+
+
+
+def liquidity_to_days(liquidity) -> int:
+    """Converte D+0, D+31, D+180, acima de D+180 etc. em número para ordenação."""
+    s = normalize_text(liquidity).replace(" ", "")
+    if not s or s in ["n/a", "na", "nan", "none", "-"]:
+        return 99999
+    if "acimaded+180" in s or "acimad+180" in s:
+        return 181
+    nums = re.findall(r"d\+?(\d+)", s)
+    if nums:
+        try:
+            return int(nums[-1])
+        except Exception:
+            return 99999
+    nums = re.findall(r"(\d+)", s)
+    if nums:
+        try:
+            return int(nums[-1])
+        except Exception:
+            return 99999
+    return 99999
+
+
+def canonical_liquidity(liquidity) -> str:
+    d = liquidity_to_days(liquidity)
+    if d == 99999:
+        return "N/A"
+    return f"D+{d}"
+
+
+def fund_product_from_liquidity(liquidity) -> str:
+    liq = canonical_liquidity(liquidity)
+    return f"Fundos {liq}" if liq != "N/A" else "Fundos"
+
+
+def load_fund_mapping():
+    """Lê data/config/fundos_mapeamento.xlsx.
+
+    Colunas mínimas: Fundo, Liquidez.
+    Coluna opcional: Alias. O Alias ajuda quando a XP abrevia ou muda o nome do fundo.
+    """
+    if not FUND_MAPPING_FILE.exists():
+        return pd.DataFrame()
+    try:
+        df = pd.read_excel(FUND_MAPPING_FILE, dtype=str)
+    except Exception:
+        return pd.DataFrame()
+    if df.empty:
+        return pd.DataFrame()
+    colmap = {normalize_text(c): c for c in df.columns}
+    fundo_col = colmap.get("fundo")
+    alias_col = colmap.get("alias")
+    liquidez_col = colmap.get("liquidez") or colmap.get("prazo") or colmap.get("prazo de resgate")
+    if not fundo_col or not liquidez_col:
+        return pd.DataFrame()
+    out = df[[fundo_col, liquidez_col] + ([alias_col] if alias_col else [])].copy()
+    out = out.rename(columns={fundo_col: "fundo", liquidez_col: "liquidez"})
+    if alias_col:
+        out = out.rename(columns={alias_col: "alias"})
+    else:
+        out["alias"] = ""
+    out["fundo"] = out["fundo"].astype(str).str.strip()
+    out["alias"] = out["alias"].fillna("").astype(str).str.strip()
+    out["liquidez"] = out["liquidez"].fillna("N/A").astype(str).str.strip()
+    out["fundo_norm"] = out["fundo"].apply(normalize_text)
+    out["alias_norm"] = out["alias"].apply(normalize_text)
+    out["liq_dias"] = out["liquidez"].apply(liquidity_to_days)
+    return out
+
+
+def map_fund_liquidity(asset_name: str, group_text: str = "") -> str:
+    mapping = load_fund_mapping()
+    target = normalize_text(asset_name)
+    base = normalize_text(f"{group_text} {asset_name}")
+
+    if not mapping.empty:
+        best_score = 0.0
+        best_liq = None
+        for _, row in mapping.iterrows():
+            candidates = [row.get("fundo_norm", ""), row.get("alias_norm", "")]
+            row_score = max(fund_match_score(target, c) for c in candidates if c)
+            row_score = max(row_score, max((fund_match_score(base, c) for c in candidates if c), default=0.0))
+            if row_score > best_score:
+                best_score = row_score
+                best_liq = row.get("liquidez")
+        if best_liq and best_score >= 0.48:
+            return canonical_liquidity(best_liq)
+
+    # fallback: tenta usar prazo explícito no bloco/nome. Se não achar, assume D+0.
+    explicit = re.findall(r"d\s*\+\s*(\d+)", f"{group_text} {asset_name}", flags=re.I)
+    if explicit:
+        return f"D+{int(explicit[-1])}"
+    return "D+0"
 
 
 def fmt_date_br(x) -> str:
@@ -1034,19 +1186,18 @@ def classify_product(group_name: str, subgroup_name: str, asset_name: str):
     if "compromiss" in s:
         return "Op. Compromissadas", "D+0", "pos_fixado"
 
+    if "saldo" in s:
+        return "Saldo em Conta", "D+0", "caixa"
+
+    if "fundo" in s or "fic" in s or "firf" in s or "fidc" in s:
+        liq = map_fund_liquidity(asset_name, f"{group_name or ''} {subgroup_name or ''}")
+        return fund_product_from_liquidity(liq), liq, "pos_fixado"
+
     if any(x in s for x in ["lca", "lci"]):
         return "Renda Fixa Isenta", "D+0", "isento"
 
-    if "fundo" in s or "fic" in s or "firf" in s:
-        if "d+31" in s or "d31" in s:
-            return "Fundos D+31", "D+31", "pos_fixado"
-        return "Fundos D+0", "D+0", "pos_fixado"
-
-    if any(x in s for x in ["cdb", "tesouro", "letra financeira"]):
-        return "Renda Fixa Pós-Fixada", "D+31", "pos_fixado"
-
-    if "saldo" in s:
-        return "Saldo em Conta", "D+0", "caixa"
+    if any(x in s for x in ["cdb", "tesouro", "letra financeira", "debenture", "debênture", "cra", "cri", "lf ", " lc "]):
+        return "Renda Fixa", "D+31", "pos_fixado"
 
     return "Outros", "N/A", "outros"
 
@@ -1112,11 +1263,9 @@ def build_position_from_row(row, group_name: str, subgroup_name: str, account: s
 
     produto, liquidez, fator = classify_product(group_name, subgroup_name, asset)
 
-    if "fundo" in group_text or "cotiza" in group_text or "cotiz" in group_text:
-        if "d+31" in group_text or "d31" in group_text:
-            produto, liquidez, fator = "Fundos D+31", "D+31", "pos_fixado"
-        else:
-            produto, liquidez, fator = "Fundos D+0", "D+0", "pos_fixado"
+    if "fundo" in group_text or "cotiza" in group_text or "cotiz" in group_text or "fidc" in group_text:
+        liquidez = map_fund_liquidity(asset, group_text)
+        produto, liquidez, fator = fund_product_from_liquidity(liquidez), liquidez, "pos_fixado"
 
     days = None
     if isinstance(appl, date) and not pd.isna(appl) and isinstance(ref_date, date):
@@ -1364,14 +1513,16 @@ def prepare_fund_positions_for_matching(positions: pd.DataFrame) -> pd.DataFrame
         return pd.DataFrame()
 
     funds["fundo_norm"] = funds["ativo"].apply(normalize_text)
+    funds["liquidez_mapeada"] = funds.apply(lambda r: map_fund_liquidity(r.get("ativo", ""), f"{r.get('grupo_origem', '')} {r.get('subgrupo_origem', '')}"), axis=1)
+    funds["produto_mapeado"] = funds["liquidez_mapeada"].apply(fund_product_from_liquidity)
 
     # Soma posição normal + eventuais valores em cotização/resgate em trânsito
     # para chegar na posição total atual do fundo/produto.
     grouped = funds.groupby(["conta", "fundo_norm"], as_index=False).agg(
         ativo=("ativo", "first"),
         titular=("titular", "first"),
-        produto=("produto", "first"),
-        liquidez=("liquidez", "first"),
+        produto=("produto_mapeado", "first"),
+        liquidez=("liquidez_mapeada", "first"),
         valor_bruto=("valor_bruto", "sum"),
         valor_liquido=("valor_liquido", "sum"),
         ir=("ir", "sum"),
@@ -1610,6 +1761,12 @@ def enrich(positions: pd.DataFrame, summary: pd.DataFrame, reference_date: date)
 
     positions["valor"] = positions["valor_bruto"]
     positions["ir"] = (positions["valor_bruto"] - positions["valor_liquido"]).clip(lower=0).round(2)
+
+    fund_mask = positions["produto"].astype(str).str.contains("Fundos", case=False, na=False)
+    if fund_mask.any():
+        mapped_liq = positions.loc[fund_mask].apply(lambda r: map_fund_liquidity(r.get("ativo", ""), f"{r.get('grupo_origem', '')} {r.get('subgrupo_origem', '')}"), axis=1)
+        positions.loc[fund_mask, "liquidez"] = mapped_liq.values
+        positions.loc[fund_mask, "produto"] = mapped_liq.apply(fund_product_from_liquidity).values
 
     positions["aplicacao_fmt"] = positions["aplicacao"].apply(fmt_date_br)
     positions["vencimento_fmt"] = positions["vencimento"].apply(fmt_date_br)
@@ -1946,6 +2103,34 @@ def render_eficiencia_compromissadas(df):
     st.markdown(html_table(table, wide=False), unsafe_allow_html=True)
 
 
+
+
+def product_sort_key(produto: str) -> int:
+    p = normalize_text(produto)
+    if "saldo" in p:
+        return 0
+    if "compromiss" in p:
+        return 1
+    if "renda fixa" in p:
+        return 2
+    if "fundo" in p:
+        return 3
+    return 9
+
+
+def sort_positions_for_cashflow(df: pd.DataFrame) -> pd.DataFrame:
+    work = df.copy()
+    work["_produto_ordem"] = work["produto"].apply(product_sort_key)
+    work["_liquidez_ordem"] = work["liquidez"].apply(liquidity_to_days)
+    work["_vencimento_ordem"] = pd.to_datetime(work["vencimento"], errors="coerce")
+    work["_vencimento_ordem"] = work["_vencimento_ordem"].fillna(pd.Timestamp("2262-04-11"))
+    work["_aplicacao_ordem"] = pd.to_datetime(work["aplicacao"], errors="coerce").fillna(pd.Timestamp("2262-04-11"))
+    return work.sort_values(
+        ["titular", "conta", "_produto_ordem", "_vencimento_ordem", "_liquidez_ordem", "_aplicacao_ordem", "ativo"],
+        ascending=[True, True, True, True, True, True, True],
+    ).drop(columns=["_produto_ordem", "_liquidez_ordem", "_vencimento_ordem", "_aplicacao_ordem"], errors="ignore")
+
+
 def render_detalhamento(positions, summary, reference_date: date):
     section("Detalhamento das contas")
 
@@ -2033,10 +2218,7 @@ def render_detalhamento(positions, summary, reference_date: date):
         help="Baixa a visão filtrada em Excel.",
     )
 
-    view = df.sort_values(
-        ["titular", "conta", "produto", "valor"],
-        ascending=[True, True, True, False],
-    ).copy()
+    view = sort_positions_for_cashflow(df).copy()
 
     view["Liq."] = view["liquidez"].apply(lambda x: f'<span class="liquidity-pill">{html.escape(str(x))}</span>')
     view["Dias"] = view["dias_desde_aplicacao"].apply(lambda x: "—" if x is None or pd.isna(x) else f"{int(x)}d")
@@ -2113,6 +2295,38 @@ def infer_emissor(row):
     return produto or "Não identificado"
 
 
+
+
+def load_policy_tables():
+    if not POLICY_FILE.exists():
+        return {}
+    try:
+        xl = pd.ExcelFile(POLICY_FILE)
+    except Exception:
+        return {}
+    tables = {}
+    for sheet_name in xl.sheet_names:
+        try:
+            df = pd.read_excel(POLICY_FILE, sheet_name=sheet_name, dtype=str)
+            df = df.dropna(how="all")
+            if not df.empty:
+                tables[sheet_name] = df.fillna("—")
+        except Exception:
+            pass
+    return tables
+
+
+def render_policy_config_tables():
+    tables = load_policy_tables()
+    if not tables:
+        return False
+    section("Política configurada")
+    for sheet_name, df in tables.items():
+        st.markdown(f'<div class="section-title" style="margin-top:10px;">{html.escape(str(sheet_name))}</div>', unsafe_allow_html=True)
+        st.markdown(html_table(df, wide=False), unsafe_allow_html=True)
+    return True
+
+
 def render_politica(positions, kpis):
     section("Política de investimentos")
 
@@ -2158,6 +2372,8 @@ def render_politica(positions, kpis):
         html_table(checks, allow_html_cols=["Status"], wide=False),
         unsafe_allow_html=True,
     )
+
+    render_policy_config_tables()
 
     section("Limite por produto / emissor")
 
