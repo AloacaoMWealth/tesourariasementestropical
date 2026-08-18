@@ -463,6 +463,27 @@ def logo_base64(path: Path) -> str:
     return base64.b64encode(path.read_bytes()).decode("utf-8")
 
 
+def get_page_icon():
+    """Retorna um favicon robusto para a guia do navegador.
+
+    Usa a logo definida em cliente.toml quando existir; redimensiona para
+    64x64 para evitar falha de favicon com imagens grandes ou largas.
+    """
+    for path in [CLIENT_LOGO, BOTUVERA_LOGO]:
+        try:
+            if path and Path(path).exists():
+                img = Image.open(path).convert("RGBA")
+                img.thumbnail((64, 64), Image.LANCZOS)
+                canvas = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+                x = (64 - img.width) // 2
+                y = (64 - img.height) // 2
+                canvas.paste(img, (x, y), img)
+                return canvas
+        except Exception:
+            continue
+    return "📊"
+
+
 def iof_rate_by_days(days: int) -> int:
     try:
         d = int(days)
@@ -525,14 +546,20 @@ def inject_css():
         [data-testid="stToolbar"],
         [data-testid="stDecoration"] {
             background: transparent !important;
+            visibility: visible !important;
+        }
+
+        section[data-testid="stSidebar"],
+        [data-testid="collapsedControl"] {
+            display: none !important;
         }
 
         .block-container {
-            max-width: 1320px !important;
+            max-width: 1540px !important;
             margin: 0 auto;
-            padding-top: 1.15rem;
-            padding-left: 1.1rem;
-            padding-right: 1.1rem;
+            padding-top: 1.0rem;
+            padding-left: 1.0rem;
+            padding-right: 1.0rem;
             padding-bottom: 3rem;
         }
 
@@ -892,7 +919,14 @@ def inject_css():
         }
 
         .table-shell.wide table.pretty {
-            min-width:100%;
+            min-width:1450px;
+            table-layout:auto;
+        }
+
+        .table-shell.wide th,
+        .table-shell.wide td {
+            white-space:normal;
+            word-break:normal;
         }
 
         table.pretty thead {
@@ -901,25 +935,25 @@ def inject_css():
 
         table.pretty th {
             color:#9EC5FF !important;
-            font-size:.62rem;
-            letter-spacing:.06em;
+            font-size:.60rem;
+            letter-spacing:.055em;
             text-transform:uppercase;
-            padding:8px 9px;
+            padding:7px 8px;
             text-align:left;
             border-bottom:1px solid rgba(148,163,184,.14);
             white-space:normal;
-            line-height:1.25;
+            line-height:1.22;
         }
 
         table.pretty td {
             color:#F8FAFC !important;
-            padding:8px 9px;
+            padding:7px 8px;
             border-bottom:1px solid rgba(148,163,184,.08);
             vertical-align:middle;
             font-weight:650;
-            line-height:1.32;
+            line-height:1.28;
             text-align:left;
-            font-size:.78rem;
+            font-size:.76rem;
             white-space:normal;
             word-break:normal;
         }
@@ -1035,6 +1069,25 @@ def inject_css():
             font-size:.78rem;
             margin-top:34px;
         }
+
+        div[data-testid="stExpander"] {
+            background:rgba(15,23,42,.50) !important;
+            border:1px solid rgba(148,163,184,.10) !important;
+            border-radius:18px !important;
+            overflow:hidden !important;
+            margin-bottom:12px !important;
+        }
+
+        div[data-testid="stExpander"] details {
+            border:none !important;
+        }
+
+        div[data-testid="stExpander"] summary {
+            color:#A9C7FF !important;
+            font-weight:850 !important;
+            letter-spacing:.02em !important;
+        }
+
 
         @media (max-width:1180px) {
             .kpi-grid {
@@ -1204,81 +1257,6 @@ def load_clients():
     return default
 
 
-
-def is_variable_income_block(text: str) -> bool:
-    """Identifica blocos de renda variável no relatório XP.
-
-    Ex.: Fundos Imobiliários, Ações, ETFs, BDRs e Renda Variável.
-    Esses blocos têm layout diferente de fundos/renda fixa.
-
-    Importante: usa termos inteiros para não confundir "inflação"
-    com "ação".
-    """
-    s = normalize_text(text)
-    if any(term in s for term in ["fundos imobiliarios", "fundo imobiliario", "renda variavel", "bovespa"]):
-        return True
-
-    return bool(re.search(r"\b(fiis|fii|acoes|acao|bdrs|bdr|etfs|etf)\b", s))
-
-
-def classify_variable_income_product(group_name: str, asset_name: str):
-    s = normalize_text(f"{group_name or ''} {asset_name or ''}")
-    if "fundo imobiliario" in s or "fundos imobiliarios" in s or "fii" in s:
-        return "Fundos Imobiliários", "D+2", "risco"
-    if "bdr" in s:
-        return "BDRs", "D+2", "risco"
-    if "etf" in s:
-        return "ETFs", "D+2", "risco"
-    return "Renda Variável", "D+2", "risco"
-
-
-def build_variable_income_position_from_row(row, group_name: str, subgroup_name: str, account: str, titular: str):
-    """Lê linhas de RV/FIIs, cujo layout XP costuma ser:
-    Ativo | Qtd. Disponível | ... | Última Cotação | Posição
-
-    A posição financeira costuma vir na última coluna.
-    """
-    asset = str(row.iloc[0]).strip() if len(row) > 0 and not is_empty(row.iloc[0]) else ""
-    if not asset or normalize_text(asset) in ["ativo", "nan", "none"]:
-        return None
-
-    # Prioridade: última coluna preenchida com valor financeiro. No bloco de FIIs,
-    # é a coluna "Posição". Fallback: maior valor monetário da linha.
-    valor_bruto = parse_money(row.iloc[-1]) if len(row) > 1 else 0.0
-    if valor_bruto <= 0:
-        vals = []
-        for item in list(row.iloc[1:]):
-            v = parse_money(item)
-            if v > 0:
-                vals.append(v)
-        vals_financeiros = [v for v in vals if v >= 100]
-        if vals_financeiros:
-            valor_bruto = max(vals_financeiros)
-
-    if valor_bruto <= 0:
-        return None
-
-    produto, liquidez, fator = classify_variable_income_product(group_name, asset)
-
-    return {
-        "conta": str(account),
-        "titular": titular,
-        "ativo": asset.upper(),
-        "produto": produto,
-        "liquidez": liquidez,
-        "fator": fator,
-        "aplicacao": pd.NaT,
-        "vencimento": pd.NaT,
-        "dias_desde_aplicacao": None,
-        "valor": valor_bruto,
-        "valor_bruto": valor_bruto,
-        "valor_liquido": valor_bruto,
-        "ir": 0.0,
-        "grupo_origem": group_name,
-        "subgrupo_origem": subgroup_name,
-    }
-
-
 def classify_product(group_name: str, subgroup_name: str, asset_name: str):
     s = f"{group_name or ''} {subgroup_name or ''} {asset_name or ''}".lower()
 
@@ -1287,9 +1265,6 @@ def classify_product(group_name: str, subgroup_name: str, asset_name: str):
 
     if "saldo" in s:
         return "Saldo em Conta", "D+0", "caixa"
-
-    if is_variable_income_block(s):
-        return classify_variable_income_product(f"{group_name or ''} {subgroup_name or ''}", asset_name)
 
     if "fundo" in s or "fic" in s or "firf" in s or "fidc" in s:
         liq = map_fund_liquidity(asset_name, f"{group_name or ''} {subgroup_name or ''}")
@@ -1316,9 +1291,6 @@ def build_position_from_row(row, group_name: str, subgroup_name: str, account: s
     venc = pd.NaT
     valor_bruto = 0.0
     valor_liquido = 0.0
-
-    if is_variable_income_block(group_text):
-        return build_variable_income_position_from_row(row, group_name, subgroup_name, account, titular)
 
     if "fundo" in group_text:
         asset = str(row.iloc[0]).strip() if not is_empty(row.iloc[0]) else str(group_name).strip().upper()
@@ -1445,13 +1417,6 @@ def parse_xp_file(file_obj, filename: str, clients: pd.DataFrame):
                 current_subgroup = None
                 capture_rows = False
 
-            continue
-
-        # Blocos de renda variável/FIIs da XP têm cabeçalho sem percentual,
-        # normalmente iniciando com "Ativo". Ex.: Fundos Imobiliários.
-        if current_group and is_variable_income_block(current_group) and normalize_text(first) == "ativo":
-            current_subgroup = current_group
-            capture_rows = True
             continue
 
         if capture_rows:
@@ -2162,7 +2127,10 @@ def render_eficiencia_fundos(positions, reference_date: date):
     view["_liq_ordem"] = view["liquidez"].apply(liquidity_to_days) if "liquidez" in view.columns else 99999
     view["_data_ordem"] = pd.to_datetime(view["data_aplicacao"], errors="coerce").fillna(pd.Timestamp("2262-04-11"))
     view = view.sort_values(["conta", "_liq_ordem", "_data_ordem", "fundo"])
-    view["Liq."] = view["liquidez"].apply(lambda x: f'<span class="liquidity-pill">{html.escape(str(x))}</span>') if "liquidez" in view.columns else "—"
+    view["Liq."] = view.apply(
+        lambda r: f'<span class="liquidity-pill">{html.escape("Venc." if str(r.get("liquidez", "")) == "Vencimento" else str(r.get("liquidez", "")))}</span>',
+        axis=1,
+    ) if "liquidez" in view.columns else "—"
     view["Aplicação"] = view["data_aplicacao"].apply(fmt_date_br)
     view["Dias"] = view["dias_desde_aplicacao"].apply(lambda x: "—" if pd.isna(x) else f"{int(x)}d")
     view["IOF"] = view["aliquota_iof"].apply(lambda x: "—" if pd.isna(x) else iof_badge(int(x)))
@@ -2206,7 +2174,7 @@ def render_eficiencia_fundos(positions, reference_date: date):
     ]
 
     st.markdown(
-        html_table(out, allow_html_cols=["Liq.", "IOF", "Status"], wide=False),
+        html_table(out, allow_html_cols=["Liq.", "IOF", "Status"], wide=True),
         unsafe_allow_html=True,
     )
 
@@ -2254,10 +2222,8 @@ def product_sort_key(produto: str) -> int:
         return 1
     if "fundo" in p:
         return 2
-    if any(x in p for x in ["renda variavel", "fundos imobiliarios", "bdr", "etf"]):
-        return 3
     if "saldo" in p or "caixa" in p:
-        return 4
+        return 3
     return 9
 
 
@@ -2271,15 +2237,10 @@ def sort_positions_for_cashflow(df: pd.DataFrame) -> pd.DataFrame:
     work["_vencimento_ordem"] = pd.to_datetime(work["vencimento"], errors="coerce")
     work["_vencimento_ordem"] = work["_vencimento_ordem"].fillna(pd.Timestamp("2262-04-11"))
 
-    # Ordem executiva:
-    # 1) renda fixa/compromissadas por vencimento;
-    # 2) fundos por liquidez;
-    # 3) renda variável/FIIs por liquidação operacional;
-    # 4) caixa/saldo.
+    # Fundos não têm vencimento no relatório. Para eles, a organização fica pela
+    # liquidez mapeada, do D+0 para o prazo mais longo.
     is_fundo = work["produto"].astype(str).str.contains("Fundos", case=False, na=False)
-    is_rv = work["produto"].astype(str).str.contains("Renda Variável|Fundos Imobiliários|BDRs|ETFs", case=False, na=False, regex=True)
-    is_caixa = work["produto"].astype(str).str.contains("Saldo|Caixa", case=False, na=False, regex=True)
-    work["_ordem_fluxo"] = np.select([is_fundo, is_rv, is_caixa], [1, 2, 3], default=0)
+    work["_ordem_fluxo"] = np.where(is_fundo, 1, 0)
 
     return work.sort_values(
         ["titular", "conta", "_ordem_fluxo", "_vencimento_ordem", "_liquidez_ordem", "ativo"],
@@ -2366,6 +2327,8 @@ def render_detalhamento(positions, summary, reference_date: date):
         "Valor líquido",
     ]
 
+    section("Posição detalhada")
+
     st.download_button(
         label="baixar arquivo",
         data=to_excel_bytes(export),
@@ -2376,7 +2339,10 @@ def render_detalhamento(positions, summary, reference_date: date):
 
     view = sort_positions_for_cashflow(df).copy()
 
-    view["Liq."] = view["liquidez"].apply(lambda x: f'<span class="liquidity-pill">{html.escape(str(x))}</span>')
+    view["Liq."] = view.apply(
+        lambda r: f'<span class="liquidity-pill">{html.escape("Venc." if str(r.get("liquidez", "")) == "Vencimento" else str(r.get("liquidez", "")))}</span>',
+        axis=1,
+    )
     view["Vence em"] = view["dias_ate_vencimento"].apply(
         lambda x: "—" if x is None or pd.isna(x) else (f"{int(x)}d" if int(x) >= 0 else "vencido")
     )
@@ -2425,7 +2391,7 @@ def render_detalhamento(positions, summary, reference_date: date):
     ]
 
     st.markdown(
-        html_table(table_view, allow_html_cols=["Liq.", "IR"], wide=False),
+        html_table(table_view, allow_html_cols=["Liq.", "IR"], wide=True),
         unsafe_allow_html=True,
     )
 
@@ -2749,7 +2715,7 @@ def render_politica(positions, kpis):
 
 
 def main():
-    page_icon = Image.open(BOTUVERA_LOGO) if BOTUVERA_LOGO.exists() else "📊"
+    page_icon = get_page_icon()
 
     st.set_page_config(
         page_title=APP_TITLE,
@@ -2760,20 +2726,11 @@ def main():
 
     inject_css()
 
-    with st.sidebar:
-        st.markdown("### Atualização de dados")
-        st.caption("Use os arquivos em `data/positions/` ou faça upload manual para conferência.")
-        uploaded = st.file_uploader(
-            "Upload manual de posições XP",
-            type=["xlsx"],
-            accept_multiple_files=True,
-        )
-
-        st.divider()
-        st.markdown("### Configurações")
-        st.write("• Política: `data/config/politica_investimentos.xlsx`")
-        st.write("• Fundos: `data/config/fundos_mapeamento.xlsx`")
-        st.write("• IOF de fundos: 96% no 1º dia e zeragem no 30º dia corrido")
+    # App em modo operacional: dados vêm dos arquivos do repositório.
+    # A barra lateral foi removida para não poluir a apresentação.
+    # Para atualizar: use o menu do Streamlit no canto superior direito
+    # ou faça novo commit nos arquivos de data/positions/.
+    uploaded = None
 
     if uploaded:
         positions, summary = load_data_from_uploads(uploaded)
