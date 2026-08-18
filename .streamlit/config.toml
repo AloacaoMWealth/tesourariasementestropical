@@ -7,8 +7,8 @@ textColor = "#F8FAFC"
 font = "sans serif"
 
 [client]
-toolbarMode = "minimal"
-showErrorDetails = false
+toolbarMode = "developer"
+showErrorDetails = true
 
 [browser]
 gatherUsageStats = false
